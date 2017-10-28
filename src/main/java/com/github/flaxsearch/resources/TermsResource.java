@@ -19,18 +19,17 @@ import javax.ws.rs.*;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
+import java.util.stream.Collectors;
 
 import com.github.flaxsearch.api.TermData;
 import com.github.flaxsearch.api.TermsData;
 import com.github.flaxsearch.util.BytesRefUtils;
 import com.github.flaxsearch.util.ReaderManager;
+import one.util.streamex.StreamEx;
 import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
-import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.automaton.CompiledAutomaton;
 import org.apache.lucene.util.automaton.RegExp;
 
@@ -50,7 +49,9 @@ public class TermsResource {
                                  @QueryParam("from") String startTerm,
                                  @QueryParam("filter") String filter,
                                  @QueryParam("encoding") @DefaultValue("utf8") String encoding,
-                                 @QueryParam("count") @DefaultValue("50") int count) throws IOException {
+                                 @QueryParam("start") @DefaultValue("0") int start,
+                                 @QueryParam("count") @DefaultValue("50") int count,
+                                 @QueryParam("sort") String sort) throws IOException {
 
         try {
             Fields fields = readerManager.getFields(segment);
@@ -60,35 +61,66 @@ public class TermsResource {
                 throw new WebApplicationException("No such field " + field, Response.Status.NOT_FOUND);
 
             TermsEnum te = getTermsEnum(terms, filter);
-            List<TermData> collected = new ArrayList<>();
 
+            if (te.next() == null) {
+                return new TermsData(terms, Collections.emptyList(), encoding);
+            }
+
+            StreamEx<TermData> stream = toStream(te, encoding);
+            if (sort != null) {
+                stream = stream.sorted(toComparator(sort));
+            }
             if (startTerm != null) {
-            	while(true) {
-                    if (te.next() == null) {
-                        return new TermsData(terms, Collections.emptyList(), encoding);
-                    }
-                    String term = BytesRefUtils.encode(te.term(), encoding);
-                    if (term.compareTo(startTerm) >= 0) {
-                        break;
-                    }
-                }
-            } else {
-                if (te.next() == null) {
-                    return new TermsData(terms, Collections.emptyList(), encoding);
-                }
+                stream = stream.dropWhile(t -> t.term.compareTo(startTerm) < 0);
             }
-
-            do {
-                TermData td = new TermData(BytesRefUtils.encode(te.term(), encoding), te.docFreq(), te.totalTermFreq());
-                collected.add(td);
+            if (start != 0) {
+                stream = stream.skip(start);
             }
-            while (te.next() != null && --count > 0);
-
+            List<TermData> collected = stream.limit(count).collect(Collectors.toList());
             return new TermsData(terms, collected, encoding);
         }
         catch (NumberFormatException e) {
             throw new WebApplicationException("Field " + field + " cannot be decoded as " + encoding, Response.Status.BAD_REQUEST);
         }
+    }
+
+    private Comparator<TermData> toComparator(String sort) {
+        String[] parts = sort.split(" ");
+        if (parts.length != 1 && parts.length != 2) {
+            throw new WebApplicationException("Illegal sort [" + sort + "]");
+        }
+        Comparator<TermData> comparator = null;
+        if ("docFreq".equals(parts[0])) {
+            comparator = Comparator.comparing(TermData::getDocFreq);
+        }
+        if ("totalTermFreq".equals(parts[0])) {
+            comparator = Comparator.comparing(TermData::getTotalTermFreq);
+        }
+        if (comparator == null) {
+            throw new WebApplicationException("Illegal sort [" + sort + "]");
+        }
+        if (parts.length == 2 && "desc".equals(parts[1])) {
+            comparator = comparator.reversed();
+        }
+        return comparator;
+    }
+
+    private StreamEx<TermData> toStream(TermsEnum te, String encoding) throws IOException {
+        return StreamEx.iterate(toTermData(te, encoding), Objects::nonNull, o -> {
+            try {
+                if (te.next() != null) {
+                    return toTermData(te, encoding);
+                } else {
+                    return null;
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    private TermData toTermData(TermsEnum te, String encoding) throws IOException {
+        return new TermData(BytesRefUtils.encode(te.term(), encoding), te.docFreq(), te.totalTermFreq());
     }
 
     private TermsEnum getTermsEnum(Terms terms, String filter) throws IOException {

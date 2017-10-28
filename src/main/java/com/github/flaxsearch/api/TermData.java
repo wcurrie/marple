@@ -33,4 +33,15 @@ public class TermData {
         this.totalTermFreq = totalTermFreq;
     }
 
+    public String getTerm() {
+        return term;
+    }
+
+    public int getDocFreq() {
+        return docFreq;
+    }
+
+    public long getTotalTermFreq() {
+        return totalTermFreq;
+    }
 }
